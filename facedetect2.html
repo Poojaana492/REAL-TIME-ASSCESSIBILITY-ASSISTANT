@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ClearPath Face Detection</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#000; color:#fff; font-family:Arial,sans-serif; overflow:hidden; }
+
+    #topbar {
+      position:fixed; top:0; left:0; right:0; z-index:200;
+      background:rgba(0,0,0,0.9);
+      border-bottom:3px solid #00ff88;
+      padding:10px 20px;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    #topbar h1 { font-size:18px; color:#00ff88; }
+
+    #alertbox {
+      position:fixed; bottom:0; left:0; right:0; z-index:200;
+      padding:18px 20px;
+      font-size:22px; font-weight:bold;
+      text-align:center;
+      background:rgba(0,255,136,0.1);
+      border-top:3px solid #00ff88;
+      color:#00ff88;
+      transition:all 0.3s;
+    }
+    #alertbox.warn   { background:rgba(255,170,0,0.2);  border-color:#ffaa00; color:#ffaa00; }
+    #alertbox.danger {
+      background:rgba(255,50,50,0.3);
+      border-color:#ff3333; color:#ff3333;
+      animation:pulse 0.5s infinite alternate;
+    }
+    @keyframes pulse { from{opacity:1} to{opacity:0.5} }
+
+    #wrap { position:relative; width:100vw; height:100vh; }
+
+    #video {
+      width:100%; height:100%;
+      object-fit:cover;
+      transform:scaleX(-1);
+    }
+
+    #canvas {
+      position:absolute; top:0; left:0;
+      width:100%; height:100%;
+      transform:scaleX(-1);
+      z-index:10;
+    }
+
+    #panel {
+      position:fixed; top:70px; right:10px; z-index:200;
+      background:rgba(0,0,0,0.88);
+      border:1px solid #00ff88;
+      border-radius:10px;
+      padding:14px 18px;
+      font-size:15px;
+      min-width:200px;
+      line-height:2.2;
+    }
+    .row { display:flex; justify-content:space-between; gap:20px; border-bottom:1px solid #111; }
+    .row:last-child { border-bottom:none; }
+    .lbl { color:#666; }
+    .val { font-weight:bold; font-family:monospace; color:#fff; }
+    .green  { color:#00ff88 !important; }
+    .yellow { color:#ffaa00 !important; }
+    .red    { color:#ff3333 !important; }
+
+    #loader {
+      position:fixed; inset:0; z-index:999;
+      background:#000;
+      display:flex; flex-direction:column;
+      align-items:center; justify-content:center; gap:20px;
+    }
+    .spin {
+      width:64px; height:64px;
+      border:4px solid #1a1a1a;
+      border-top-color:#00ff88;
+      border-radius:50%;
+      animation:spin 0.7s linear infinite;
+    }
+    @keyframes spin { to{transform:rotate(360deg)} }
+    #lmsg { font-size:18px; font-weight:bold; color:#00ff88; font-family:monospace; letter-spacing:.1em; }
+    #lsub { font-size:13px; color:#555; font-family:monospace; }
+
+    #vbtn {
+      background:transparent;
+      border:2px solid #00ff88;
+      color:#00ff88;
+      padding:6px 16px;
+      border-radius:20px;
+      font-size:13px; font-weight:bold;
+      cursor:pointer;
+    }
+
+    #debug {
+      position:fixed; bottom:80px; left:10px; z-index:200;
+      background:rgba(0,0,0,0.8);
+      border:1px solid #333;
+      border-radius:6px;
+      padding:8px 12px;
+      font-size:11px;
+      font-family:monospace;
+      color:#555;
+      max-width:260px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>👁 ClearPath — Face Detection</h1>
+  <button id="vbtn" onclick="toggleVoice()">🔊 Voice ON</button>
+</div>
+
+<div id="alertbox">Initialising...</div>
+
+<div id="wrap">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="panel">
+  <div class="row"><span class="lbl">Faces</span><span class="val green" id="p-faces">0</span></div>
+  <div class="row"><span class="lbl">Closest</span><span class="val" id="p-dist">--</span></div>
+  <div class="row"><span class="lbl">Confidence</span><span class="val" id="p-conf">--%</span></div>
+  <div class="row"><span class="lbl">FPS</span><span class="val green" id="p-fps">--</span></div>
+  <div class="row"><span class="lbl">Status</span><span class="val green" id="p-status">Loading...</span></div>
+</div>
+
+<div id="debug" id="debug">Model: loading...</div>
+
+<div id="loader">
+  <div class="spin"></div>
+  <div id="lmsg">LOADING AI MODEL</div>
+  <div id="lsub">This takes about 10–15 seconds...</div>
+</div>
+
+<!-- Load both TinyFaceDetector + SSD for reliability -->
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script>
+
+  let voiceOn   = true;
+  let lastCount = -1;
+  let lastSpeak = '';
+  let frameN    = 0;
+  let fpsTs     = Date.now();
+  let modelType = 'ssd'; // which model is loaded
+
+  function $(id){ return document.getElementById(id); }
+
+  /* ── VOICE ── */
+  function speak(txt, force) {
+    if (!voiceOn) return;
+    if (!force && txt === lastSpeak) return;
+    lastSpeak = txt;
+    if ('speechSynthesis' in window) {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(txt);
+      u.rate=1; u.volume=1; u.pitch=1.05;
+      speechSynthesis.speak(u);
+    }
+    setTimeout(()=>{ if(lastSpeak===txt) lastSpeak=''; }, 5000);
+  }
+
+  function toggleVoice(){
+    voiceOn = !voiceOn;
+    $('vbtn').textContent = voiceOn ? '🔊 Voice ON' : '🔇 Voice OFF';
+    $('vbtn').style.borderColor = voiceOn ? '#00ff88' : '#555';
+    $('vbtn').style.color = voiceOn ? '#00ff88' : '#555';
+    if(!voiceOn) speechSynthesis.cancel();
+  }
+
+  /* ── DISTANCE ── */
+  function dist(boxH, fH){
+    const r = boxH/fH;
+    if(r > 0.35) return { text:'< 1 m',  tier:'danger' };
+    if(r > 0.18) return { text:'1 - 2 m', tier:'warn'  };
+    if(r > 0.08) return { text:'2 - 4 m', tier:'safe'  };
+    return              { text:'> 4 m',   tier:'safe'  };
+  }
+
+  /* ── DRAW BOXES ── */
+  function drawBoxes(dets, canvas){
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    dets.forEach((det, i) => {
+      // handle both SSD and TinyFaceDetector result formats
+      const box  = det.detection ? det.detection.box : det.box;
+      const score= det.detection ? det.detection.score : det.score;
+      const boxH = det.detection ? det.detection._box._height : box.height;
+
+      const d   = dist(boxH, canvas.height);
+      const col = d.tier==='danger' ? '#ff3333' : d.tier==='warn' ? '#ffaa00' : '#00ff88';
+
+      // glowing box
+      ctx.shadowColor = col;
+      ctx.shadowBlur  = 20;
+      ctx.strokeStyle = col;
+      ctx.lineWidth   = 3;
+      ctx.strokeRect(box.x, box.y, box.width, box.height);
+      ctx.shadowBlur  = 0;
+
+      // corner brackets
+      const cl = 20;
+      ctx.lineWidth = 4;
+      [
+        [box.x,             box.y,              1,  1],
+        [box.x+box.width,   box.y,             -1,  1],
+        [box.x,             box.y+box.height,   1, -1],
+        [box.x+box.width,   box.y+box.height,  -1, -1]
+      ].forEach(([px,py,dx,dy])=>{
+        ctx.beginPath();
+        ctx.strokeStyle=col;
+        ctx.moveTo(px+dx*cl,py); ctx.lineTo(px,py); ctx.lineTo(px,py+dy*cl);
+        ctx.stroke();
+      });
+
+      // label
+      const lbl = `FACE ${i+1}  |  ${d.text}  |  ${Math.round(score*100)}%`;
+      ctx.font = 'bold 14px Arial';
+      const tw = ctx.measureText(lbl).width + 20;
+      ctx.shadowColor=col; ctx.shadowBlur=8;
+      ctx.fillStyle=col;
+      ctx.fillRect(box.x, box.y-30, tw, 26);
+      ctx.shadowBlur=0;
+      ctx.fillStyle='#000';
+      ctx.fillText(lbl, box.x+10, box.y-10);
+    });
+  }
+
+  /* ── UPDATE PANEL + ALERT ── */
+  function updateUI(dets, fH){
+    const fc = dets.length;
+    $('p-faces').textContent = fc;
+
+    if(fc===0){
+      $('alertbox').className='';
+      $('alertbox').textContent='✓  Path Clear — No Faces Detected';
+      $('p-dist').textContent='--';
+      $('p-conf').textContent='--%';
+      $('p-status').textContent='CLEAR';
+      $('p-status').className='val green';
+      if(fc!==lastCount) speak('Path clear. Safe to proceed.');
+    } else {
+      // find max confidence + closest
+      let maxConf=0, minR=0;
+      dets.forEach(d=>{
+        const sc = d.detection ? d.detection.score : d.score;
+        const bH = d.detection ? d.detection._box._height : d.box.height;
+        if(sc>maxConf) maxConf=sc;
+        if(bH/fH > minR) minR = bH/fH;
+      });
+
+      $('p-conf').textContent = Math.round(maxConf*100)+'%';
+      const closest = dist(minR*fH, fH);
+      $('p-dist').textContent = closest.text;
+
+      const dangers = dets.filter(d=>{
+        const bH = d.detection ? d.detection._box._height : d.box.height;
+        return dist(bH,fH).tier==='danger';
+      });
+      const warns = dets.filter(d=>{
+        const bH = d.detection ? d.detection._box._height : d.box.height;
+        return dist(bH,fH).tier==='warn';
+      });
+
+      if(dangers.length>0){
+        $('alertbox').className='danger';
+        $('alertbox').textContent=`🚨  PERSON VERY CLOSE — STOP IMMEDIATELY!`;
+        $('p-status').textContent='DANGER';
+        $('p-status').className='val red';
+        speak('Warning! Person very close. Stop immediately!');
+      } else if(warns.length>0){
+        $('alertbox').className='warn';
+        $('alertbox').textContent=`⚠  ${fc} Person Nearby — Slow Down`;
+        $('p-status').textContent='WARNING';
+        $('p-status').className='val yellow';
+        speak('Caution. Person nearby. Slow down.');
+      } else {
+        $('alertbox').className='';
+        $('alertbox').textContent=`👁  ${fc} Person Detected — Safe Distance`;
+        $('p-status').textContent='SAFE';
+        $('p-status').className='val green';
+      }
+    }
+    lastCount=fc;
+  }
+
+  /* ── DETECTION LOOP ── */
+  async function loop(video, canvas){
+    if(video.readyState===4){
+      // sync canvas size
+      if(canvas.width!==video.videoWidth){
+        canvas.width  = video.videoWidth  || canvas.offsetWidth;
+        canvas.height = video.videoHeight || canvas.offsetHeight;
+      }
+
+      let dets = [];
+      try {
+        if(modelType==='tiny'){
+          dets = await faceapi.detectAllFaces(
+            video,
+            new faceapi.TinyFaceDetectorOptions({ inputSize:416, scoreThreshold:0.3 })
+          );
+        } else {
+          dets = await faceapi.detectAllFaces(
+            video,
+            new faceapi.SsdMobilenetv1Options({ minConfidence:0.3 })
+          );
+        }
+      } catch(e){ console.warn('detection error',e); }
+
+      // resize to canvas display size
+      const resized = faceapi.resizeResults(dets, {
+        width:  canvas.offsetWidth,
+        height: canvas.offsetHeight
+      });
+
+      drawBoxes(resized, canvas);
+      updateUI(resized, canvas.offsetHeight);
+
+      $('debug').textContent =
+        `Model: ${modelType} | Raw detections: ${dets.length} | Canvas: ${canvas.width}x${canvas.height}`;
+
+      // FPS
+      frameN++;
+      const now=Date.now();
+      if(now-fpsTs>=1000){
+        $('p-fps').textContent=frameN;
+        frameN=0; fpsTs=now;
+      }
+    }
+    requestAnimationFrame(()=>loop(video,canvas));
+  }
+
+  /* ── INIT ── */
+  async function init(){
+    try {
+      $('lsub').textContent='Loading TinyFaceDetector model...';
+      const MODEL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
+
+      // Try TinyFaceDetector first (faster, works on more hardware)
+      try {
+        await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL);
+        modelType = 'tiny';
+        $('lsub').textContent='TinyFaceDetector loaded ✓';
+      } catch(e){
+        // Fall back to SSD
+        $('lsub').textContent='Trying SSD MobileNet...';
+        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL);
+        modelType = 'ssd';
+        $('lsub').textContent='SSD MobileNet loaded ✓';
+      }
+
+      $('lmsg').textContent='STARTING CAMERA';
+      $('lsub').textContent='Allow camera access when prompted...';
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video:{
+          width:{ideal:1280}, height:{ideal:720},
+          facingMode:'user'
+        }
+      });
+
+      const video  = $('video');
+      const canvas = $('canvas');
+
+      video.srcObject = stream;
+      await new Promise(r=>{ video.onloadedmetadata=r; });
+      await video.play();
+
+      // Wait for first frame
+      await new Promise(r=>setTimeout(r,500));
+
+      $('loader').style.display='none';
+      $('alertbox').textContent='✓ Scanning...';
+      $('p-status').textContent='ACTIVE';
+
+      speak('ClearPath face detection is now active.', true);
+      loop(video, canvas);
+
+    } catch(err){
+      $('lmsg').textContent='ERROR';
+      $('lmsg').style.color='#ff3333';
+      $('lsub').textContent=err.message;
+      console.error(err);
+    }
+  }
+
+  window.addEventListener('load', ()=>{
+    const t = setInterval(()=>{
+      if(typeof faceapi!=='undefined'){
+        clearInterval(t);
+        setTimeout(init, 300);
+      }
+    }, 100);
+  });
+</script>
+</body>
+</html>
